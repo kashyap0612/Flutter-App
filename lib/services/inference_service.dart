@@ -1,123 +1,127 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
-import 'package:tflite_flutter/tflite_flutter.dart';
 
 import '../models/inference_result.dart';
-import 'label_service.dart';
+import 'model_service.dart';
+import 'storage_service.dart';
 
 class InferenceService {
-  Interpreter? _interpreter;
-  late final List<String> _labels;
-  final LabelService _labelService;
+  InferenceService({
+    required ModelService modelService,
+    required StorageService storageService,
+    this.leafThreshold = 0.5,
+    this.diseaseThreshold = 0.0,
+  })  : _modelService = modelService,
+        _storageService = storageService;
 
-  InferenceService({LabelService? labelService})
-      : _labelService = labelService ?? LabelService();
+  final ModelService _modelService;
+  final StorageService _storageService;
+  final double leafThreshold;
+  final double diseaseThreshold;
 
-  Future<void> init() async {
-    _interpreter ??= await Interpreter.fromAsset(
-      'assets/models/crop_disease_model.tflite',
-      options: InterpreterOptions()..threads = 2,
+  Future<InferenceResult> runPipeline(File imageFile) async {
+    await _modelService.init();
+
+    final savedImagePathFuture = _storageService.saveImage(imageFile);
+
+    final leafSize = _modelService.leafInputTensor.shape[1];
+    final leafBytes = await compute(
+      _preprocessImage,
+      _PreprocessRequest(path: imageFile.path, size: leafSize),
     );
-    _labels = await _labelService.loadLabels();
-  }
 
-  Future<InferenceResult> runInference(String imagePath) async {
-    if (_interpreter == null) {
-      await init();
+    final leafOutput = _modelService.runLeaf(leafBytes);
+    final leafMax = _argMax(leafOutput);
+    final leafConfidence = leafOutput[leafMax];
+    final leafLabel = _labelAt(_modelService.leafLabels, leafMax);
+    final isLeaf = leafLabel.toLowerCase().contains('leaf')
+        ? !leafLabel.toLowerCase().contains('non') &&
+            !leafLabel.toLowerCase().contains('no')
+        : leafMax == 1;
+
+    final savedImagePath = await savedImagePathFuture;
+
+    if (!isLeaf || leafConfidence < leafThreshold) {
+      return InferenceResult(
+        isLeaf: false,
+        leafLabel: leafLabel,
+        leafConfidence: leafConfidence,
+        savedImagePath: savedImagePath,
+      );
     }
 
-    final inputTensor = _interpreter!.getInputTensor(0);
-    final outputTensor = _interpreter!.getOutputTensor(0);
-
-    final resized = _preprocessImage(
-      imagePath,
-      width: inputTensor.shape[1],
-      height: inputTensor.shape[2],
-      isFloat: inputTensor.type == TfLiteType.float32,
+    final diseaseSize = _modelService.diseaseInputTensor.shape[1];
+    final diseaseBytes = await compute(
+      _preprocessImage,
+      _PreprocessRequest(path: imageFile.path, size: diseaseSize),
     );
 
-    final outputShape = outputTensor.shape;
-    final output = List.generate(
-      outputShape[0],
-      (_) => List.filled(outputShape[1], 0.0),
-    );
-
-    _interpreter!.run(resized, output);
-
-    final probabilities = output.first;
-    final topPreds = _topK(probabilities, k: 3);
-
-    final best = topPreds.first;
-    final label = _labels[best['index'] as int];
+    final diseaseOutput =
+        _modelService.runDisease(diseaseBytes, _modelService.diseaseLabels.length);
+    final diseaseMax = _argMax(diseaseOutput);
+    final diseaseConfidence = diseaseOutput[diseaseMax];
 
     return InferenceResult(
-      label: label,
-      cropType: _labelService.extractCropType(label),
-      confidence: best['score'] as double,
-      topPredictions: topPreds
-          .map((entry) => {
-                'label': _labels[entry['index'] as int],
-                'confidence': entry['score'],
-              })
-          .toList(),
+      isLeaf: true,
+      leafLabel: leafLabel,
+      leafConfidence: leafConfidence,
+      diseaseLabel: diseaseConfidence >= diseaseThreshold
+          ? _labelAt(_modelService.diseaseLabels, diseaseMax)
+          : 'Low confidence',
+      diseaseConfidence: diseaseConfidence,
+      savedImagePath: savedImagePath,
     );
   }
 
-  List<dynamic> _preprocessImage(
-    String imagePath, {
-    required int width,
-    required int height,
-    required bool isFloat,
-  }) {
-    final bytes = File(imagePath).readAsBytesSync();
-    final decoded = img.decodeImage(bytes);
-    if (decoded == null) {
-      throw Exception('Invalid image selected. Could not decode image bytes.');
+  static int _argMax(List<double> values) {
+    var maxIndex = 0;
+    var maxValue = values[0];
+    for (var i = 1; i < values.length; i++) {
+      if (values[i] > maxValue) {
+        maxValue = values[i];
+        maxIndex = i;
+      }
     }
+    return maxIndex;
+  }
 
-    final resized = img.copyResize(decoded, width: width, height: height);
-
-    if (isFloat) {
-      return [
-        List.generate(
-          height,
-          (y) => List.generate(
-            width,
-            (x) {
-              final pixel = resized.getPixel(x, y);
-              return [pixel.r / 255.0, pixel.g / 255.0, pixel.b / 255.0];
-            },
-          ),
-        ),
-      ];
+  static String _labelAt(List<String> labels, int index) {
+    if (index < 0 || index >= labels.length) {
+      return 'Unknown';
     }
+    return labels[index];
+  }
+}
 
-    return [
-      List.generate(
-        height,
-        (y) => List.generate(
-          width,
-          (x) {
-            final pixel = resized.getPixel(x, y);
-            return [pixel.r.toInt(), pixel.g.toInt(), pixel.b.toInt()];
-          },
-        ),
-      ),
-    ];
+class _PreprocessRequest {
+  const _PreprocessRequest({required this.path, required this.size});
+
+  final String path;
+  final int size;
+}
+
+Uint8List _preprocessImage(_PreprocessRequest request) {
+  final bytes = File(request.path).readAsBytesSync();
+  final original = img.decodeImage(bytes);
+  if (original == null) {
+    throw Exception('Unable to decode image');
   }
 
-  List<Map<String, dynamic>> _topK(List<double> probs, {int k = 3}) {
-    final indexed = probs.asMap().entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    return indexed
-        .take(k)
-        .map((e) => {'index': e.key, 'score': e.value})
-        .toList();
+  final resized = img.copyResize(original, width: request.size, height: request.size);
+  final buffer = Uint8List(request.size * request.size * 3);
+
+  var i = 0;
+  for (var y = 0; y < request.size; y++) {
+    for (var x = 0; x < request.size; x++) {
+      final pixel = resized.getPixel(x, y);
+      buffer[i++] = pixel.r.toInt();
+      buffer[i++] = pixel.g.toInt();
+      buffer[i++] = pixel.b.toInt();
+    }
   }
 
-  void dispose() {
-    _interpreter?.close();
-    _interpreter = null;
-  }
+  return buffer;
 }

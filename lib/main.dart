@@ -1,29 +1,37 @@
 import 'package:flutter/material.dart';
-import 'package:hive_flutter/hive_flutter.dart';
 
-import 'models/scan_record.dart';
 import 'screens/home_screen.dart';
+import 'services/inference_service.dart';
+import 'services/model_service.dart';
+import 'services/storage_service.dart';
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await Hive.initFlutter();
-  await Hive.openBox(ScanRecord.boxName);
-  runApp(const CropDiseaseApp());
+
+  final modelService = ModelService.instance;
+  final storageService = StorageService();
+  final inferenceService = InferenceService(
+    modelService: modelService,
+    storageService: storageService,
+  );
+
+  runApp(MyApp(inferenceService: inferenceService));
 }
 
-class CropDiseaseApp extends StatelessWidget {
-  const CropDiseaseApp({super.key});
+class MyApp extends StatelessWidget {
+  const MyApp({super.key, required this.inferenceService});
+
+  final InferenceService inferenceService;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Crop Disease Detector',
-      debugShowCheckedModeBanner: false,
+      title: 'Leaf Disease Inference',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2E7D32)),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
         useMaterial3: true,
       ),
-      home: const HomeScreen(),
+      home: HomeScreen(inferenceService: inferenceService),
     );
   }
 }

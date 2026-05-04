@@ -1,13 +1,17 @@
 class InferenceResult {
-  final String label;
-  final String cropType;
-  final double confidence;
-  final List<Map<String, dynamic>> topPredictions;
-
   const InferenceResult({
-    required this.label,
-    required this.cropType,
-    required this.confidence,
-    required this.topPredictions,
+    required this.isLeaf,
+    required this.leafLabel,
+    required this.leafConfidence,
+    this.diseaseLabel,
+    this.diseaseConfidence,
+    required this.savedImagePath,
   });
+
+  final bool isLeaf;
+  final String leafLabel;
+  final double leafConfidence;
+  final String? diseaseLabel;
+  final double? diseaseConfidence;
+  final String savedImagePath;
 }

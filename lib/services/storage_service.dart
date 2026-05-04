@@ -1,36 +1,25 @@
 import 'dart:io';
 
-import 'package:hive/hive.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-import '../models/scan_record.dart';
-
 class StorageService {
-  final Box _box = Hive.box(ScanRecord.boxName);
+  Future<String> saveImage(File imageFile) async {
+    final baseDir = await getApplicationDocumentsDirectory();
+    final inferenceDir = Directory(p.join(baseDir.path, 'inference_images'));
 
-  Future<String> persistImage(File source) async {
-    final directory = await getApplicationDocumentsDirectory();
-    final targetPath = '${directory.path}/${DateTime.now().millisecondsSinceEpoch}.jpg';
-    final copied = await source.copy(targetPath);
-    return copied.path;
-  }
-
-  Future<void> saveRecord(ScanRecord record) async {
-    await _box.put(record.id, record.toMap());
-  }
-
-  List<ScanRecord> allRecords() {
-    return _box.values
-        .map((v) => ScanRecord.fromMap(Map<dynamic, dynamic>.from(v as Map)))
-        .toList()
-      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-  }
-
-  Future<void> deleteRecord(String id, String imagePath) async {
-    await _box.delete(id);
-    final file = File(imagePath);
-    if (await file.exists()) {
-      await file.delete();
+    if (!await inferenceDir.exists()) {
+      await inferenceDir.create(recursive: true);
     }
+
+    final now = DateTime.now();
+    final timestamp =
+        '${now.year.toString().padLeft(4, '0')}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_'
+        '${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}_${now.millisecond.toString().padLeft(3, '0')}';
+    final fileName = 'leaf_$timestamp.jpg';
+    final targetPath = p.join(inferenceDir.path, fileName);
+
+    await imageFile.copy(targetPath);
+    return targetPath;
   }
 }
